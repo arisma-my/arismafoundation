@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Status sumbangan | ARISMA Foundation</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#070706">
+<link rel="icon" href="/img/logo-emas.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Marcellus&family=Atkinson+Hyperlegible+Next:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="/assets/gaya.css">
+<style>
+  body{background:var(--malam);color:#fff;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}
+  .kotak{flex:1;display:grid;place-items:center;text-align:center;padding:60px 20px}
+  .kotak img{width:220px;margin:0 auto 36px}
+  .kotak h1{font-size:clamp(2rem,4.5vw,3.2rem);max-width:20ch;margin:0 auto}
+  .kotak p{color:rgba(255,255,255,.78);max-width:52ch;margin:18px auto 0}
+  .kotak .aksi{justify-content:center;margin-top:30px}
+</style>
+</head>
+<body>
+<main class="kotak">
+  <div>
+    <img src="/img/logo-emas.png" alt="ARISMA Foundation" width="600" height="224">
+    <h1 id="tajuk">Menyemak pembayaran anda…</h1>
+    <p id="teks">Sebentar, kami sedang mengesahkan dengan toyyibPay.</p>
+    <div class="aksi"><a class="btn btn-emas" href="/">Kembali ke laman utama</a></div>
+  </div>
+</main>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var bil = (q.get("billcode") || "").replace(/[^A-Za-z0-9]/g, "");
+  var status = q.get("status_id");
+  var en = false; try { en = localStorage.getItem("arisma-bahasa") === "en"; } catch (e) {}
+  if (en) document.documentElement.lang = "en";
+  var T = en ? {
+    ok: ["Thank you. Your donation was received.", "Your official receipt will arrive by email within a few minutes. If you don't see it, check your spam folder."],
+    tunggu: ["Your payment is being processed.", "Some banks take a few minutes to confirm. We will email your receipt once it succeeds."],
+    gagal: ["The payment was not completed.", "No money was taken. You can try again from the donation form."],
+    balik: "Back to home"
+  } : {
+    ok: ["Terima kasih. Sumbangan anda telah diterima.", "Resit rasmi akan tiba di e-mel anda dalam beberapa minit. Jika tiada, semak folder spam."],
+    tunggu: ["Pembayaran anda sedang diproses.", "Sesetengah bank mengambil masa beberapa minit untuk mengesahkan. Resit akan dihantar ke e-mel sebaik sahaja berjaya."],
+    gagal: ["Pembayaran tidak berjaya.", "Tiada wang ditolak. Anda boleh cuba semula melalui borang sumbangan."],
+    balik: "Kembali ke laman utama"
+  };
+  document.querySelector(".aksi a").textContent = T.balik;
+  function papar(k) { document.getElementById("tajuk").textContent = T[k][0]; document.getElementById("teks").textContent = T[k][1]; }
+  if (!bil) { papar(status === "1" ? "tunggu" : "gagal"); return; }
+  var cubaan = 0;
+  (function semak() {
+    fetch("/api/toyyibpay?billcode=" + encodeURIComponent(bil), { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.status === "dibayar") return papar("ok");
+        if (++cubaan < 4) return setTimeout(semak, 4000);
+        papar(status === "3" ? "gagal" : "tunggu");
+      })
+      .catch(function () { papar(status === "1" ? "tunggu" : status === "3" ? "gagal" : "tunggu"); });
+  })();
+})();
+</script>
+</body>
+</html>
