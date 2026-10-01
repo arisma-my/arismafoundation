@@ -1,114 +1,158 @@
-# ARISMA Foundation — laman web (arismafoundation.org.my)
+# ARISMA Foundation: laman web di Cloudflare
 
-## Isi folder
+Satu Cloudflare Worker melayan laman statik (`public/`) dan backend sumbangan (`src/`).
+Data disimpan dalam Cloudflare D1. Tiada Vercel, Google Sheet atau Apps Script.
+
 ```
-index.html               halaman utama Yayasan
-degup2027/index.html     halaman Kembara DEGUP ARISMA 2027 (arismafoundation.org.my/degup2027)
-terima-kasih/index.html  halaman selepas bayaran toyyibPay
-assets/gaya.css          gaya bersama
-assets/laman.js          bahasa BM/EN, kandungan Sheet, borang sumbang & penajaan
-img/logo-emas.png        logo emas (dipotong daripada video)
-video/intro.mp4          video logo (tanda air dibuang, dimampatkan ke 1.2 MB)
-video/poster.jpg         bingkai akhir video (dipapar sebelum video main / jika tidak boleh main)
-api/kandungan.js         bawa kandungan awam dari Sheet (cache 2 minit)
-api/sumbang.js           rekod sumbangan + cipta bil toyyibPay
-api/toyyibpay.js         sahkan bayaran terus dengan toyyibPay, kemudian Sheet hantar resit
-api/taja.js              borang hasrat penajaan
-api/_skrip.js            bantuan dikongsi (bukan laluan)
-apps-script/Code.gs      "otak" Google Sheet — ditampal dalam Sheet, BUKAN di-upload ke Vercel
-vercel.json, package.json
+public/                 laman awam (HTML, CSS, JS, video)
+  index.html            laman utama Yayasan
+  degup2027/            kempen Kembara DEGUP ARISMA 2027 + borang penajaan
+  sumbang/              borang sumbangan (+ selesai/ selepas bayar)
+  _headers              pengepala keselamatan untuk fail statik
+src/                    backend (Worker)
+  index.js              penghala + cron
+  sumbang.js            cipta sumbangan, sahkan bayaran, cron
+  toyyibpay.js          klien toyyibPay
+  resit.js              resit rasmi 44(6) (web + e-mel)
+  awam.js               /api/tetapan, /api/kutipan, /api/taja
+  pentadbir.js          eksport CSV (dilindungi Cloudflare Access)
+  util.js               keselamatan, penyulitan, utiliti
+migrations/0001_awal.sql  skema pangkalan data
+wrangler.jsonc          tetapan Worker
 ```
 
-## Konsep
-Google Sheet ialah tempat kandungan diubah. Guna Sheet BARU untuk Yayasan, berasingan daripada Sheet akademi.
+## Apa yang menjaga keselamatan
 
-| Tab               | Mengawal                                                                 | Awam? |
-|-------------------|--------------------------------------------------------------------------|-------|
-| Tetapan           | suis sumbangan, no. kelulusan 44(6), alamat, e-mel, DuitNow QR, PDF cadangan | ya |
-| Projek            | senarai projek, teks BM/EN, sasaran, kutipan luar, buka/tutup            | ya    |
-| PemegangAmanah    | nama dan jawatan; hanya `papar = ya` keluar                              | ya    |
-| Tetapan_Dalaman   | e-mel admin, kepala resit, penandatangan, awalan no. resit               | TIDAK |
-| Sumbangan         | setiap sumbangan (termasuk no. K/P dan alamat). Diisi automatik          | TIDAK |
-| Penajaan          | borang hasrat penajaan. Diisi automatik                                  | TIDAK |
+- Status bayaran **sentiasa disahkan terus dengan toyyibPay**. Callback dan URL pulang hanya dianggap isyarat, jadi bayaran palsu tidak boleh menghasilkan resit.
+- Nombor resit `AF/TAHUN/000001` diberi dalam satu kenyataan pangkalan data atomik: tiada nombor berulang, tiada resit pendua.
+- No. IC / pendaftaran, alamat dan telefon penderma disimpan **bersulit AES-256-GCM**. Konsol D1 hanya menunjukkan teks tersulit.
+- Borang dilindungi Cloudflare Turnstile, had kadar per IP, semakan asal permintaan (CSRF) dan had saiz input.
+- CSP ketat (tiada skrip sebaris), HSTS, larangan bingkai, `nosniff`, Permissions-Policy.
+- Pautan resit ditandatangani HMAC dan tamat selepas 30 hari. Salinan penuh ada dalam e-mel penderma.
+- Eksport data pentadbir hanya melalui Cloudflare Access, dan Worker mengesahkan token Access sendiri.
+- Rahsia (kunci toyyibPay, Turnstile, penyulitan) disimpan sebagai Secret di Cloudflare, bukan dalam kod.
 
-Peraturan penting:
-- Tab Sumbangan mengandungi no. K/P penderma. Hadkan akses EDIT dan VIEW kepada orang yang perlu sahaja (PDPA).
-- Jangan letak nombor K/P pemegang amanah di mana-mana tab awam. Jangan muat naik sijil pemerbadanan
-  tanpa menghitamkan nombor K/P dahulu.
-- Projek baharu: tambah satu baris dalam tab Projek (id huruf kecil, cth. `rumah-transit`). Ia terus muncul
-  di halaman utama dan dalam pilihan borang sumbang.
-- Kutipan tunai / pindahan bank: tambah pada lajur `kutipan_luar` projek tersebut. Bar kutipan = toyyibPay + kutipan luar.
-- Jika Sheet tidak dapat dibaca, laman guna kandungan asal dalam HTML. Laman tidak akan rosak.
+---
 
-## Cara aliran sumbangan berfungsi
-1. Penderma isi borang (projek, amaun, nama, no. K/P / SSM, alamat, e-mel, telefon).
-2. `/api/sumbang` rekod baris "menunggu" dalam Sheet, cipta bil toyyibPay khusus untuk penderma itu, dan hantar penderma ke toyyibPay.
-3. Selepas bayar, toyyibPay panggil `/api/toyyibpay` dan hantar penderma ke `/terima-kasih/`.
-4. `/api/toyyibpay` TIDAK percaya notis itu. Ia tanya toyyibPay sendiri sama ada bil sudah dibayar.
-   Sheet hanya terima kod bil yang ia sendiri cipta.
-5. Sheet tanda "dibayar", beri no. resit berturutan (AF/2026/00001), jana PDF, e-mel kepada penderma
-   (salinan BCC ke e-mel admin) dan simpan salinan dalam folder Drive "Resit ARISMA Foundation".
-6. Vercel Cron semak semula bil "menunggu" setiap hari (jika notis toyyibPay terlepas).
+## Pasang (tanpa domain dahulu)
 
-Resit 44(6) hanya dikeluarkan jika penderma tanda kotak resit DAN memberi no. pengenalan dan alamat,
-DAN `s44_rujukan` diisi dalam tab Tetapan. Jika tidak, penderma masih terima resit biasa tanpa pernyataan 44(6).
+### 0. Akaun
+- Cloudflare: aktifkan **2FA** (My Profile > Authentication).
+- GitHub: cipta repo **Private** dan muat naik semua fail folder ini.
 
-## Sambung Sheet (sekali sahaja)
-1. Google Drive > New > Google Sheets. Namakan "ARISMA Foundation Laman". Guna akaun Google Yayasan.
-2. Extensions > Apps Script. Padam kod asal, tampal seluruh `apps-script/Code.gs`, Save.
-3. Pilih fungsi `sediakanSheet` > Run. Beri kebenaran (jika ada amaran "belum disahkan":
-   Advanced > Go to project). Tab-tab akan tercipta.
-4. Pilih fungsi `tetapkanKunci` > Run. Buka Execution log, salin nilai `KUNCI_SKRIP = ...`.
-5. Isi tab Tetapan (`s44_rujukan`, `s44_tempoh`, `alamat`, `emel`) dan Tetapan_Dalaman (`emel_admin`, `alamat_resit`, `penandatangan`).
-6. Pilih fungsi `ujiResitKeEmelSaya` > Run. Semak resit PDF contoh dalam e-mel anda.
-   Minta ejen cukai / akauntan Yayasan sahkan format resit sebelum dibuka kepada awam.
-7. Deploy > New deployment > Web app. Execute as: Me. Who has access: Anyone. Deploy. Salin URL (berakhir /exec).
-   Jika ubah Code.gs kemudian: Deploy > Manage deployments > edit > Version: New version.
+### 1. Cipta pangkalan data D1
+1. Dashboard Cloudflare > **Storage & databases > D1 SQL database > Create**. Nama: `arisma-foundation`.
+2. Salin **Database ID**, tampal dalam `wrangler.jsonc` menggantikan `GANTI-DENGAN-DATABASE-ID`. Commit ke GitHub.
+3. Buka pangkalan data itu > **Console**. Tampal seluruh isi `migrations/0001_awal.sql` > **Execute**.
 
-## Pasang di Vercel
-1. Muat naik folder ini ke repo GitHub baharu. Folder apps-script boleh ikut sekali; Vercel tidak menggunakannya.
-2. Vercel > Add New Project > pilih repo. Framework: Other. Deploy.
-3. Settings > Environment Variables:
-   ```
-   APPS_SCRIPT_URL      URL langkah 7 di atas
-   KUNCI_SKRIP          kunci langkah 4
-   LAMAN_URL            https://arismafoundation.org.my
-   CRON_SECRET          rentetan rawak panjang (untuk semakan harian)
-   ```
-   Kemudian Redeploy.
-4. Domain: Settings > Domains > tambah `arismafoundation.org.my` dan `www.arismafoundation.org.my`.
-   Masukkan rekod DNS yang Vercel beri di pendaftar domain / Cloudflare (Proxy status "DNS only").
+### 2. Sambung repo kepada Cloudflare
+1. **Workers & Pages > Create > Import a repository** > pilih repo.
+2. Biarkan arahan deploy `npx wrangler deploy`. Klik **Deploy**.
+3. Anda dapat alamat `https://arisma-foundation.<nama-akaun>.workers.dev`. Laman sudah boleh dilihat.
+   Setiap kali anda push ke GitHub, Cloudflare deploy semula secara automatik.
 
-## Buka kutipan dalam talian (toyyibPay)
-1. Akaun toyyibPay atas nama Yayasan (bukan WIBARISMA), disahkan.
-2. Cipta Category untuk sumbangan. Salin `categoryCode`. Salin `userSecretKey` dari profil akaun.
-3. Uji dahulu di sandbox: daftar di dev.toyyibpay.com, kemudian dalam Vercel:
-   ```
-   TOYYIBPAY_BASE       https://dev.toyyibpay.com
-   TOYYIBPAY_SECRET     userSecretKey sandbox
-   TOYYIBPAY_CATEGORY   categoryCode sandbox
-   ```
-   Tukar `buka_sumbangan` kepada `ya` dalam tab Tetapan. Buat satu sumbangan ujian hingga resit sampai.
-4. Bila berjaya: padam `TOYYIBPAY_BASE`, tukar SECRET dan CATEGORY kepada akaun sebenar, Redeploy.
-5. Pilihan: `TOYYIBPAY_CHANNEL` ("0" FPX sahaja, "1" kad sahaja, "2" kedua-dua), `TOYYIBPAY_CAJ` (siapa tanggung caj;
-   kosong = Yayasan), `MAKS_SUMBANGAN` (asal RM30,000).
+### 3. Turnstile (anti-bot)
+1. **Turnstile > Add widget**. Hostname: alamat workers.dev di atas. Mode: Managed.
+2. Salin **Site Key** ke `TURNSTILE_SITEKEY` dalam `wrangler.jsonc`.
+3. Simpan **Secret Key** untuk langkah 4.
 
-## Had yang perlu tahu
-- E-mel resit dihantar melalui Gmail akaun yang memiliki Sheet. Akaun Gmail biasa ada had harian
-  (kira-kira 100 e-mel sehari); Google Workspace lebih tinggi. Jika dijangka banyak penderma sehari
-  (cth. malam tayangan DEGUP), guna akaun Workspace.
-- Resit gagal dihantar? Lajur `resit` tunjuk "gagal: ...". Jalankan fungsi `hantarSemulaResitTertunggak`.
-- DuitNow QR statik tidak boleh dijejak secara automatik. Penderma QR perlu WhatsApp bukti bayaran;
-  masukkan jumlahnya dalam `kutipan_luar` dan keluarkan resit secara manual.
+### 4. Rahsia
+Worker > **Settings > Variables and Secrets > Add**, jenis **Secret**:
 
-## Kemas kini video logo
-Ganti `video/intro.mp4` dan `video/poster.jpg` (bingkai terakhir). Kekalkan nisbah 16:9 dan latar hitam,
-supaya tepi video bercantum dengan latar halaman. Jika ada versi resolusi lebih tinggi (1920×1080), guna itu.
+| Nama | Nilai |
+|---|---|
+| `TURNSTILE_SECRET` | Secret Key Turnstile |
+| `TOYYIBPAY_SECRET` | userSecretKey toyyibPay (sandbox dahulu) |
+| `TOYYIBPAY_CATEGORY` | categoryCode toyyibPay |
+| `KUNCI_DATA` | kunci penyulitan, lihat di bawah |
+| `KUNCI_RESIT` | kunci tandatangan resit, lihat di bawah |
+| `RESEND_API_KEY` | selepas domain dibeli (langkah 7) |
 
-## Sebelum siar
-- No. rujukan dan tempoh kelulusan 44(6) dalam tab Tetapan
-- Alamat berdaftar dan e-mel rasmi Yayasan
-- Sahkan senarai pemegang amanah semasa (tab PemegangAmanah)
-- Sahkan sasaran: Desa ARISMA RM2,000,000 dan DEGUP RM330,000 (tab Projek)
-- Kertas cadangan penajaan (PDF) dan gambar DuitNow QR, jika ada
-- Semak format resit dengan ejen cukai / akauntan
+Jana `KUNCI_DATA` dan `KUNCI_RESIT` (dua kali, nilai berbeza): buka mana-mana laman, tekan F12 > Console, tampal:
+
+```js
+btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
+```
+
+**Simpan salinan `KUNCI_DATA` dalam pengurus kata laluan Yayasan.** Jika hilang, no. IC dan alamat penderma tidak boleh dibaca semula. Jangan sekali-kali tukar kunci ini selepas kutipan bermula.
+
+Dalam `wrangler.jsonc`, isi `LAMAN_URL` dengan alamat workers.dev, commit.
+
+### 5. Uji dengan toyyibPay sandbox
+1. Daftar di `dev.toyyibpay.com`, cipta Category, ambil userSecretKey dan categoryCode.
+2. `wrangler.jsonc`: pastikan `TOYYIBPAY_BASE` = `https://dev.toyyibpay.com`, tukar `BUKA_SUMBANGAN` ke `"ya"`. Commit.
+3. Buat sumbangan ujian di `/sumbang/`. Selepas bayar, halaman selesai tunjuk no. resit dan pautan resit.
+4. Semak dalam D1 Console: `SELECT id, status, amaun_sen, tahun_resit, siri_resit, emel_resit FROM derma;`
+5. Selesai menguji: kembalikan `BUKA_SUMBANGAN` ke `"tidak"` sehingga langkah 6–8 siap.
+
+---
+
+## Sebelum kutipan sebenar dibuka
+
+Jangan buka kutipan awam sehingga **ketiga-tiga** ini selesai:
+
+1. **Contoh resit diluluskan KPHDN.** Surat kelulusan perenggan 3.1(d) mewajibkan contoh resit dikemukakan untuk persetujuan sebelum digunakan. Cetak satu resit sandbox (butang Cetak / simpan PDF) dan kemukakan. Jika LHDN minta ubah format, ubah `src/resit.js`.
+2. **Akaun toyyibPay atas nama ARISMA Foundation** (bukan WIBARISMA), disahkan untuk mod live.
+3. **Domain dibeli dan disambung** (langkah 6–7), supaya penderma nampak alamat rasmi dan resit boleh dihantar melalui e-mel.
+
+Kemudian: `TOYYIBPAY_BASE` = `https://toyyibpay.com`, tukar dua rahsia toyyibPay kepada akaun live, `BUKA_SUMBANGAN` = `"ya"`.
+
+## 6. Domain
+1. Beli `arismafoundation.org.my` melalui pendaftar MYNIC (perlukan sijil pemerbadanan Yayasan).
+2. Cloudflare > **Add a domain** > pelan Free. Tukar nameserver di pendaftar kepada yang Cloudflare beri.
+3. Worker > **Settings > Domains & Routes > Add > Custom domain**: `arismafoundation.org.my` dan `www.arismafoundation.org.my`.
+4. Kemas kini `LAMAN_URL` = `https://arismafoundation.org.my`. Tambah hostname domain dalam widget Turnstile.
+5. Tetapan zon domain:
+   - **SSL/TLS > Edge Certificates**: Always Use HTTPS = On, Minimum TLS = 1.2.
+   - **DNS > Settings**: Enable DNSSEC, kemudian masukkan rekod DS di pendaftar.
+   - **Security > Bots**: Bot Fight Mode = On.
+   - **Security > WAF**: aktifkan peraturan terurus (managed rules) yang tersedia.
+
+## 7. E-mel resit (Resend)
+1. Daftar di resend.com > **Domains > Add** `arismafoundation.org.my`. Masukkan rekod DNS yang diberi ke Cloudflare DNS.
+2. Cipta API key > simpan sebagai Secret `RESEND_API_KEY`.
+3. `wrangler.jsonc`: `EMEL_DARI` = `"ARISMA Foundation <resit@arismafoundation.org.my>"`, `EMEL_PENTADBIR` = e-mel bendahari (menerima salinan setiap resit dan notis penajaan).
+
+Tanpa Resend, sistem tetap berfungsi: penderma dapat resit di halaman selesai, dan e-mel ditanda `tiada konfigurasi`.
+
+## 8. Akses pentadbir (eksport CSV)
+1. **Zero Trust > Access > Applications > Add > Self-hosted**. Domain: `arismafoundation.org.my`, path: `pentadbir`.
+2. Policy: Allow, Emails = e-mel bendahari dan pentadbir. Kaedah log masuk: One-time PIN.
+3. Salin **Application Audience (AUD) Tag** ke `ACCESS_AUD`, dan nama pasukan (`<nama>.cloudflareaccess.com`) ke `ACCESS_TEAM_DOMAIN` dalam `wrangler.jsonc`.
+4. Muat turun:
+   - `https://arismafoundation.org.my/pentadbir/sumbangan.csv?dari=2027-01-01&hingga=2027-12-31`
+   - `https://arismafoundation.org.my/pentadbir/taja.csv`
+
+CSV mengandungi no. IC dan alamat penuh untuk e-Invois dan audit. Simpan di tempat terkawal.
+
+---
+
+## Kerja harian
+
+**Kutipan luar talian** (pindahan bank, cek) supaya penjejak di laman tepat. D1 Console:
+```sql
+INSERT INTO kutipan_luar (kempen, amaun_sen, tarikh, catatan)
+VALUES ('degup2027', 1500000, '2027-02-01', 'Penaja zonal: Syarikat X');
+```
+`amaun_sen` dalam sen (RM15,000 = 1500000). Resit untuk kutipan ini dikeluarkan secara manual.
+
+**Sumbangan berstatus `semak`**: amaun dibayar tidak sama dengan amaun bil. Semak di dashboard toyyibPay sebelum tindakan.
+
+**Video logo**: letak `public/media/intro.mp4` (16:9, latar hitam) dan `poster.jpg`. Jika tiada, bahagian video disembunyikan sendiri.
+
+**Ubah teks**: sunting fail HTML terus. Setiap teks ada dua versi, `<span lang="ms">` dan `<span lang="en">`. Kepala dan kaki halaman berulang dalam 5 fail HTML.
+
+**Sasaran penjejak**: `SASARAN_DEGUP2027` dalam `wrangler.jsonc` (RM).
+
+## Laman Akademi
+Dalam `index.html` Akademi, isi `yayasan_sumbang` (atau tetapan Sheet `pautan_sumbang_yayasan`) dengan
+`https://arismafoundation.org.my/sumbang/` (sebelum domain: alamat workers.dev + `/sumbang/`).
+Butang "Sumbang melalui ARISMA Foundation" akan muncul. Laluan `/api/desa` dalam Worker Akademi tidak digunakan lagi.
+
+## Uji di komputer (pilihan)
+```
+npm install
+cp .dev.vars.contoh .dev.vars     # isi nilai
+npm run db:local
+npm run dev                       # http://localhost:8787
+```
